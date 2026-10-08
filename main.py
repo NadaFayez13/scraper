@@ -5,8 +5,24 @@ import requests
 from urllib.parse import urljoin
 from datetime import datetime, timezone
 import hashlib
+import re
+from typing import Optional
+from pydantic import BaseModel, Field, HttpUrl, ValidationError
+import json
 
-
+class BookSchema(BaseModel):
+    title: str
+    product_url: HttpUrl
+    price_text: str
+    price_gbp: float = Field(..., ge=0)
+    availability_text: str
+    in_stock: bool
+    rating_text: Optional[str] = None
+    rating_stars: Optional[int] = Field(None, ge=1, le=5)
+    description: Optional[str] = None
+    source_page: HttpUrl
+    fetched_at: str
+ 
 HEADERS = {
     'User-Agent': 'FlyRankInternship-A9/1.0 (Educational Scraping Project; Contact: nada@example.com)'
 }
@@ -98,6 +114,30 @@ def parse_book_page(url: str, source_page_url: str) -> dict:
         "fetched_at": datetime.now(timezone.utc).isoformat()
     }
 
+def normalize_and_validate(raw_record: dict) -> BookSchema:
+    """تنظيف البيانات وحساب الحقول المشتفة والتحقق من الـ Schema"""
+    
+    price_gbp = 0.0
+    if raw_record.get('price_text'):
+        match = re.search(r'[\d.]+', raw_record['price_text'])
+        if match:
+            price_gbp = float(match.group())
+
+    rating_map = {"One": 1, "Two": 2, "Three": 3, "Four": 4, "Five": 5}
+    rating_stars = rating_map.get(raw_record.get('rating_text'), None)
+
+    in_stock = "In stock" in raw_record.get('availability_text', '')
+
+    cleaned_data = {
+        **raw_record,
+        "price_gbp": price_gbp,
+        "rating_stars": rating_stars,
+        "in_stock": in_stock
+    }
+
+    return BookSchema(**cleaned_data)
+
+
 def discover_book_links(max_pages: int = 3):
     
     book_urls = []
@@ -130,8 +170,33 @@ if __name__ == '__main__':
     all_books = discover_book_links(max_pages=3)
     print(f"\n Total unique book links discovered: {len(all_books)}")
     
-    print("\n[TEST] Parsing first book record...")
-    sample_record = parse_book_page(all_books[0], 'https://books.toscrape.com/catalogue/page-1.html')
+    valid_books = []
+    error_records = []
     
-    import json
-    print(json.dumps(sample_record, indent=2, ensure_ascii=False))
+    os.makedirs('output', exist_ok=True)
+    
+    print("\n[PROCESSING] Scraping and validating 60 books...")
+    for idx, book_url in enumerate(all_books, 1):
+        source_page_num = ((idx - 1) // 20) + 1
+        source_page_url = f"https://books.toscrape.com/catalogue/page-{source_page_num}.html"
+        
+        try:
+            raw_record = parse_book_page(book_url, source_page_url)
+            validated_book = normalize_and_validate(raw_record)
+
+            valid_books.append(validated_book.model_dump(mode='json'))
+        except Exception as e:
+            error_records.append({
+                "url": book_url,
+                "error": str(e)
+            })
+            
+    with open('output/books.json', 'w', encoding='utf-8') as f:
+        json.dump(valid_books, f, indent=2, ensure_ascii=False)
+        
+    with open('output/errors.json', 'w', encoding='utf-8') as f:
+        json.dump(error_records, f, indent=2, ensure_ascii=False)
+        
+    print(f"\n Finished Successfully!")
+    print(f" Saved {len(valid_books)} valid books to output/books.json")
+    print(f" Saved {len(error_records)} errors to output/errors.json")
